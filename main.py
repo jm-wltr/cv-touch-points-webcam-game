@@ -2,6 +2,7 @@ import cv2
 import mediapipe as mp
 import random
 import numpy as np
+import time
 from PIL import Image, ImageDraw, ImageFont
 
 # Initialize MediaPipe Pose and Hands
@@ -18,11 +19,25 @@ hands = mp_hands.Hands(
     max_num_hands=1
 )
 
+# Segmentation model for body silhouette
+mp_selfie_segmentation = mp.solutions.selfie_segmentation
+segmentation = mp_selfie_segmentation.SelfieSegmentation(model_selection=1)
+
 # Game settings
 BODY_PARTS = ['Right Hand', 'Left Hand', 'Right Elbow', 'Left Elbow', 'Head']
 TOUCH_THRESHOLD = 50
+FIST_HOLD_FRAMES = 15
+TARGET_FPS = 30
+BUTTON_WIDTH = 400
+BUTTON_HEIGHT = 80
+BUTTON_SPACING = 30
+CURSOR_RADIUS = 20
+TARGET_RADIUS = 30
+BODY_PART_RADIUS = 15
+
 score = 0
-debug_mode = False
+show_silhouette = True  # Always show silhouette by default
+debug_mode = False  # Separate debug mode for skeleton
 
 LANDMARK_MAP = {
     'Right Hand': mp_pose.PoseLandmark.RIGHT_WRIST,
@@ -46,6 +61,7 @@ except:
         FONT_MEDIUM = ImageFont.truetype("arial.ttf", 28)
         FONT_SMALL = ImageFont.truetype("arial.ttf", 20)
     except:
+        print("Warning: Could not load TrueType fonts, using default fonts")
         FONT_TITLE = ImageFont.load_default()
         FONT_LARGE = ImageFont.load_default()
         FONT_MEDIUM = ImageFont.load_default()
@@ -87,6 +103,23 @@ def draw_button_pil(draw, text, position, size, color, hover=False, enabled=True
     
     return (x, y, x + w, y + h)
 
+def apply_body_silhouette(frame, segmentation_result, color=(0, 255, 0)):
+    """Apply a solid color silhouette of the body"""
+    # Get the segmentation mask
+    mask = segmentation_result.segmentation_mask
+    
+    # Create a condition where mask > 0.5 (person detected)
+    condition = mask > 0.5
+    
+    # Create solid color overlay
+    colored_overlay = np.zeros_like(frame)
+    colored_overlay[:] = color
+    
+    # Apply the mask: show colored silhouette where person is detected
+    output_image = np.where(condition[:, :, np.newaxis], colored_overlay, frame)
+    
+    return output_image.astype(np.uint8)
+
 def is_fist_closed(hand_landmarks):
     """Detect if hand is making a fist"""
     wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
@@ -126,35 +159,34 @@ def is_point_in_button(point, button_bounds):
 
 def show_menu(cap, frame_width, frame_height):
     """Display menu with beautiful PIL rendering"""
-    global debug_mode
+    global show_silhouette, debug_mode
+
+    cv2.namedWindow('Body Part Touch Game', cv2.WINDOW_NORMAL)
     
-    button_width = 400
-    button_height = 80
-    button_spacing = 30
     start_y = 200
-    center_x = (frame_width - button_width) // 2
+    center_x = (frame_width - BUTTON_WIDTH) // 2
     
     buttons = [
         {
             'text': 'Single Player',
             'position': (center_x, start_y),
-            'size': (button_width, button_height),
+            'size': (BUTTON_WIDTH, BUTTON_HEIGHT),
             'color': (50, 150, 50),
             'mode': 'single',
             'enabled': True
         },
         {
             'text': 'Two Players',
-            'position': (center_x, start_y + button_height + button_spacing),
-            'size': (button_width, button_height),
+            'position': (center_x, start_y + BUTTON_HEIGHT + BUTTON_SPACING),
+            'size': (BUTTON_WIDTH, BUTTON_HEIGHT),
             'color': (100, 100, 100),
             'mode': 'two',
             'enabled': False
         },
         {
             'text': 'Crazy Multiplayer',
-            'position': (center_x, start_y + 2 * (button_height + button_spacing)),
-            'size': (button_width, button_height),
+            'position': (center_x, start_y + 2 * (BUTTON_HEIGHT + BUTTON_SPACING)),
+            'size': (BUTTON_WIDTH, BUTTON_HEIGHT),
             'color': (100, 100, 100),
             'mode': 'crazy',
             'enabled': False
@@ -163,7 +195,6 @@ def show_menu(cap, frame_width, frame_height):
     
     hover_index = None
     fist_timer = 0
-    FIST_HOLD_FRAMES = 15
     
     mouse_click_button = [None]
     
@@ -174,9 +205,14 @@ def show_menu(cap, frame_width, frame_height):
                     mouse_click_button[0] = i
                     break
     
+    # Set up mouse callback once
+    cv2.setMouseCallback('Body Part Touch Game', mouse_callback, [])
+    
     print("Menu loaded!")
     
     while cap.isOpened():
+        frame_start = time.time()
+        
         ret, frame = cap.read()
         if not ret:
             return None
@@ -187,16 +223,24 @@ def show_menu(cap, frame_width, frame_height):
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         hand_results = hands.process(rgb_frame)
         
+        # Process pose for debug skeleton
         pose_results = None
         if debug_mode:
             pose_results = pose.process(rgb_frame)
         
-        # Convert to PIL for drawing
-        pil_img = Image.fromarray(rgb_frame)
-        draw = ImageDraw.Draw(pil_img, 'RGBA')
+        # Always process segmentation for body silhouette
+        seg_results = segmentation.process(rgb_frame)
         
-        # Dark overlay
-        draw.rectangle([0, 0, frame_width, frame_height], fill=(20, 20, 20, 180))
+        # Apply body silhouette
+        if seg_results and show_silhouette:
+            frame = apply_body_silhouette(frame, seg_results, color=(0, 200, 200))
+        
+        # Convert to PIL for drawing (RGBA mode for transparency)
+        rgb_frame_for_pil = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb_frame_for_pil).convert('RGBA')
+        overlay = Image.new('RGBA', pil_img.size, (20, 20, 20, 180))
+        pil_img = Image.alpha_composite(pil_img, overlay)
+        draw = ImageDraw.Draw(pil_img)
         
         # Title
         title = "BODY PART TOUCH GAME"
@@ -220,6 +264,9 @@ def show_menu(cap, frame_width, frame_height):
             )
             button_bounds.append(bounds)
         
+        # Update mouse callback with current button bounds
+        cv2.setMouseCallback('Body Part Touch Game', mouse_callback, button_bounds)
+        
         # Coming soon labels
         for i in range(1, 3):
             button = buttons[i]
@@ -231,21 +278,25 @@ def show_menu(cap, frame_width, frame_height):
         instructions = [
             "Hover your hand over a button",
             "Close your fist, click mouse, or press SPACE to select",
-            "Press 'd' to toggle debug mode"
+            "Press 's' to toggle silhouette, 'd' for debug mode"
         ]
         y_pos = frame_height - 100
         for instruction in instructions:
             draw.text((30, y_pos), instruction, font=FONT_SMALL, fill=(200, 200, 200))
             y_pos += 25
         
-        # Debug indicator
+        # Status indicators
+        status_y = 30
+        if show_silhouette:
+            draw.text((frame_width - 250, status_y), "Silhouette: ON", font=FONT_SMALL, fill=(0, 255, 200))
+            status_y += 30
         if debug_mode:
-            draw.text((frame_width - 250, 30), "DEBUG MODE: ON", font=FONT_MEDIUM, fill=(0, 255, 255))
+            draw.text((frame_width - 250, status_y), "DEBUG MODE: ON", font=FONT_SMALL, fill=(255, 255, 0))
         
-        # Convert back to OpenCV
-        frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        # Convert back to OpenCV (RGB)
+        frame = cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2BGR)
         
-        # Draw skeleton if debug
+        # Draw skeleton if debug mode (on top of everything)
         if debug_mode and pose_results and pose_results.pose_landmarks:
             mp_drawing.draw_landmarks(
                 frame,
@@ -270,15 +321,13 @@ def show_menu(cap, frame_width, frame_height):
                 
                 # Draw hand cursor
                 cursor_color = (0, 255, 0) if current_fist_closed else (255, 0, 255)
-                cv2.circle(frame, (hand_x, hand_y), 20, cursor_color, -1)
-                cv2.circle(frame, (hand_x, hand_y), 25, (255, 255, 255), 2)
+                cv2.circle(frame, (hand_x, hand_y), CURSOR_RADIUS, cursor_color, -1)
+                cv2.circle(frame, (hand_x, hand_y), CURSOR_RADIUS + 5, (255, 255, 255), 2)
                 
-                # Status text with PIL-like quality
-                pil_overlay = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                draw_overlay = ImageDraw.Draw(pil_overlay)
+                # Status text
                 fist_text = "FIST!" if current_fist_closed else "OPEN"
-                draw_overlay.text((hand_x + 30, hand_y - 10), fist_text, font=FONT_SMALL, fill=(255, 255, 0))
-                frame = cv2.cvtColor(np.array(pil_overlay), cv2.COLOR_RGB2BGR)
+                cv2.putText(frame, fist_text, (hand_x + 30, hand_y - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
                 
                 # Check hover
                 for i, bounds in enumerate(button_bounds):
@@ -304,8 +353,6 @@ def show_menu(cap, frame_width, frame_height):
         else:
             fist_timer = 0
         
-        cv2.setMouseCallback('Body Part Touch Game', mouse_callback, button_bounds)
-        
         if mouse_click_button[0] == 0:
             return 'single'
         
@@ -316,9 +363,17 @@ def show_menu(cap, frame_width, frame_height):
             return None
         elif key == ord(' ') and hover_index == 0:
             return 'single'
+        elif key == ord('s'):
+            show_silhouette = not show_silhouette
+            print(f"Silhouette view: {'ON' if show_silhouette else 'OFF'}")
         elif key == ord('d'):
             debug_mode = not debug_mode
-            print(f"Debug mode: {'ON' if debug_mode else 'OFF'}")
+            print(f"Debug mode (skeleton): {'ON' if debug_mode else 'OFF'}")
+        
+        # FPS limiting
+        frame_time = time.time() - frame_start
+        wait_time = max(1, int((1.0 / TARGET_FPS - frame_time) * 1000))
+        cv2.waitKey(wait_time)
     
     return None
 
@@ -333,14 +388,19 @@ def generate_target(frame_width, frame_height):
     return (x, y), body_part
 
 def play_game(cap, frame_width, frame_height):
-    global score, debug_mode
+    global score, show_silhouette, debug_mode
     score = 0
     
     target_pos, target_body_part = generate_target(frame_width, frame_height)
     
+    window_name = 'Body Part Touch Game'
+    cv2.namedWindow(window_name)
+    
     print("Game Started!")
     
     while cap.isOpened():
+        frame_start = time.time()
+        
         ret, frame = cap.read()
         if not ret:
             break
@@ -349,35 +409,33 @@ def play_game(cap, frame_width, frame_height):
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = pose.process(rgb_frame)
         
-        # Convert to PIL
-        pil_img = Image.fromarray(rgb_frame)
+        # Always process segmentation for body silhouette
+        seg_results = segmentation.process(rgb_frame)
+        
+        # Apply body silhouette
+        if seg_results and show_silhouette:
+            frame = apply_body_silhouette(frame, seg_results, color=(0, 200, 200))
+        
+        # Convert to PIL (RGBA mode)
+        rgb_frame_for_pil = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb_frame_for_pil).convert('RGBA')
         draw = ImageDraw.Draw(pil_img)
         
         body_part_x, body_part_y = 0, 0
         distance = 0
         
         if results.pose_landmarks:
-            if debug_mode:
-                # Draw on opencv frame first
-                frame_temp = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-                mp_drawing.draw_landmarks(
-                    frame_temp,
-                    results.pose_landmarks,
-                    mp_pose.POSE_CONNECTIONS,
-                    mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=3),
-                    mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=2)
-                )
-                pil_img = Image.fromarray(cv2.cvtColor(frame_temp, cv2.COLOR_BGR2RGB))
-                draw = ImageDraw.Draw(pil_img)
-            
             landmark = LANDMARK_MAP[target_body_part]
             body_part_landmark = results.pose_landmarks.landmark[landmark]
             
             body_part_x = int(body_part_landmark.x * frame_width)
             body_part_y = int(body_part_landmark.y * frame_height)
             
+
+            
             # Draw body part tracker
-            draw.ellipse([body_part_x - 15, body_part_y - 15, body_part_x + 15, body_part_y + 15], 
+            draw.ellipse([body_part_x - BODY_PART_RADIUS, body_part_y - BODY_PART_RADIUS, 
+                         body_part_x + BODY_PART_RADIUS, body_part_y + BODY_PART_RADIUS], 
                         fill=(255, 0, 255))
             
             distance = calculate_distance((body_part_x, body_part_y), target_pos)
@@ -387,7 +445,8 @@ def play_game(cap, frame_width, frame_height):
                 target_pos, target_body_part = generate_target(frame_width, frame_height)
         
         # Draw target
-        draw.ellipse([target_pos[0] - 30, target_pos[1] - 30, target_pos[0] + 30, target_pos[1] + 30], 
+        draw.ellipse([target_pos[0] - TARGET_RADIUS, target_pos[1] - TARGET_RADIUS, 
+                     target_pos[0] + TARGET_RADIUS, target_pos[1] + TARGET_RADIUS], 
                     outline=(255, 0, 0), width=3)
         draw.ellipse([target_pos[0] - 5, target_pos[1] - 5, target_pos[0] + 5, target_pos[1] + 5], 
                     fill=(255, 0, 0))
@@ -397,6 +456,13 @@ def play_game(cap, frame_width, frame_height):
                                  FONT_LARGE, (255, 255, 255), (0, 0, 0, 180), padding=15)
         draw_text_with_background(draw, f"Score: {score}", (20, 80), 
                                  FONT_LARGE, (0, 255, 0), (0, 0, 0, 180), padding=15)
+        
+        # Status indicators
+        status_y = 20
+        if show_silhouette:
+            draw_text_with_background(draw, "Silhouette: ON", (frame_width - 250, status_y), 
+                                     FONT_SMALL, (0, 255, 200), (0, 0, 0, 180), padding=8)
+            status_y += 35
         
         # Debug info
         if debug_mode:
@@ -410,27 +476,45 @@ def play_game(cap, frame_width, frame_height):
             ]
             debug_y = 120
             for i, text in enumerate(debug_texts):
-                color = (0, 255, 255) if i == 0 else (255, 255, 255)
-                draw_text_with_background(draw, text, (frame_width - 400, debug_y + i * 30), 
+                color = (255, 255, 0) if i == 0 else (255, 255, 255)
+                draw_text_with_background(draw, text, (frame_width - 450, debug_y + i * 30), 
                                          FONT_SMALL, color, (0, 0, 0, 200), padding=10)
         
         # Controls
-        draw.text((20, frame_height - 40), "Press 'ESC' for menu, 'd' for debug, or 'q' to quit", 
+        draw.text((20, frame_height - 40), "Press 'ESC' for menu, 's' silhouette, 'd' debug, or 'q' to quit", 
                  font=FONT_SMALL, fill=(255, 255, 255))
         
-        # Convert back
-        frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        # Convert back to OpenCV
+        frame = cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2BGR)
         
-        cv2.imshow('Body Part Touch Game', frame)
+        # Draw skeleton if debug mode (on top of everything)
+        if debug_mode and results.pose_landmarks:
+            mp_drawing.draw_landmarks(
+                frame,
+                results.pose_landmarks,
+                mp_pose.POSE_CONNECTIONS,
+                mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=3),
+                mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=2)
+            )
+        
+        cv2.imshow(window_name, frame)
         
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             return 'quit'
-        elif key == 27:
+        elif key == 27:  # ESC key
             return 'menu'
+        elif key == ord('s'):
+            show_silhouette = not show_silhouette
+            print(f"Silhouette view: {'ON' if show_silhouette else 'OFF'}")
         elif key == ord('d'):
             debug_mode = not debug_mode
-            print(f"Debug mode: {'ON' if debug_mode else 'OFF'}")
+            print(f"Debug mode (skeleton): {'ON' if debug_mode else 'OFF'}")
+        
+        # FPS limiting
+        frame_time = time.time() - frame_start
+        wait_time = max(1, int((1.0 / TARGET_FPS - frame_time) * 1000))
+        cv2.waitKey(wait_time)
     
     return 'quit'
 
@@ -443,6 +527,10 @@ def main():
     
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    print(f"Webcam resolution: {frame_width}x{frame_height}")
+    print(f"Body silhouette is ON by default. Press 's' to toggle.")
+    print(f"Press 'd' for debug mode (skeleton view).")
     
     while True:
         mode = show_menu(cap, frame_width, frame_height)
@@ -459,6 +547,8 @@ def main():
     cv2.destroyAllWindows()
     pose.close()
     hands.close()
+    segmentation.close()
+    print("Game closed. Thanks for playing!")
 
 if __name__ == "__main__":
     main()
