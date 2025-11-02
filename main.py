@@ -26,13 +26,15 @@ segmentation = mp_selfie_segmentation.SelfieSegmentation(model_selection=1)
 # Game settings
 BODY_PARTS = ['Right Hand', 'Left Hand', 'Right Elbow', 'Left Elbow', 'Head']
 TOUCH_THRESHOLD = 50
+TOUCH_THRESHOLD_Z = 0.05
+Z_SCALE = 3.0
 FIST_HOLD_FRAMES = 15
 TARGET_FPS = 30
 BUTTON_WIDTH = 400
 BUTTON_HEIGHT = 80
 BUTTON_SPACING = 30
 CURSOR_RADIUS = 20
-TARGET_RADIUS = 30
+TARGET_RADIUS = 20
 BODY_PART_RADIUS = 15
 
 score = 0
@@ -377,21 +379,39 @@ def show_menu(cap, frame_width, frame_height):
     
     return None
 
-def calculate_distance(point1, point2):
-    return np.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
+def calculate_3d_distance(point1, point2):
+    dx = point1[0] - point2[0]
+    dy = point1[1] - point2[1]
+    dz = point1[2] - point2[2]
+    return np.sqrt(dx*dx + dy*dy + dz*dz)
+
+def z_to_scale(z, min_scale=0.5, max_scale=2.0, z_min=-0.4, z_max=0.1):
+    """
+    Convert z value to a scale factor for drawing.
+    Closer (smaller z) → bigger circle.
+    """
+    # Clamp z to expected range
+    z = max(min(z, z_max), z_min)
+    
+    # Invert z: smaller z (closer) → bigger scale
+    scale = max_scale - (z - z_min) / (z_max - z_min) * (max_scale - min_scale)
+    return scale
 
 def generate_target(frame_width, frame_height):
     margin = 100
     x = random.randint(margin, frame_width - margin)
     y = random.randint(margin, frame_height - margin)
+    z = random.uniform(-0.6, -0.4)  # smaller = closer, larger = farther
     body_part = random.choice(BODY_PARTS)
-    return (x, y), body_part
+    return (x, y, z), body_part
 
 def play_game(cap, frame_width, frame_height):
     global score, show_silhouette, debug_mode
     score = 0
     
+    # Generate target with x, y, z
     target_pos, target_body_part = generate_target(frame_width, frame_height)
+    target_x, target_y, target_z = target_pos
     
     window_name = 'Body Part Touch Game'
     cv2.namedWindow(window_name)
@@ -409,49 +429,59 @@ def play_game(cap, frame_width, frame_height):
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = pose.process(rgb_frame)
         
-        # Always process segmentation for body silhouette
+        # Process segmentation
         seg_results = segmentation.process(rgb_frame)
-        
-        # Apply body silhouette
         if seg_results and show_silhouette:
             frame = apply_body_silhouette(frame, seg_results, color=(0, 200, 200))
         
-        # Convert to PIL (RGBA mode)
+        # PIL overlay
         rgb_frame_for_pil = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb_frame_for_pil).convert('RGBA')
         draw = ImageDraw.Draw(pil_img)
         
-        body_part_x, body_part_y = 0, 0
+        body_part_x, body_part_y, body_part_z = 0, 0, 0
         distance = 0
         
+        # Draw body tracker
         if results.pose_landmarks:
             landmark = LANDMARK_MAP[target_body_part]
             body_part_landmark = results.pose_landmarks.landmark[landmark]
             
             body_part_x = int(body_part_landmark.x * frame_width)
             body_part_y = int(body_part_landmark.y * frame_height)
+            body_part_z = body_part_landmark.z  # relative depth
             
+            # Scale body tracker based on depth
+            scale = z_to_scale(body_part_landmark.z)
+            scaled_radius = int(BODY_PART_RADIUS * scale)
 
+            draw.ellipse(
+                [body_part_x - scaled_radius, body_part_y - scaled_radius,
+                body_part_x + scaled_radius, body_part_y + scaled_radius],
+                fill=(255, 0, 255)
+            )
             
-            # Draw body part tracker
-            draw.ellipse([body_part_x - BODY_PART_RADIUS, body_part_y - BODY_PART_RADIUS, 
-                         body_part_x + BODY_PART_RADIUS, body_part_y + BODY_PART_RADIUS], 
-                        fill=(255, 0, 255))
+            # Calculate distance (3D)
+            distance = calculate_3d_distance(
+                (body_part_x, body_part_y, body_part_z),
+                (target_x, target_y, target_z)
+            )
             
-            distance = calculate_distance((body_part_x, body_part_y), target_pos)
-            
-            if distance < TOUCH_THRESHOLD:
+            # Check if target is touched
+            if distance < TOUCH_THRESHOLD and abs(body_part_z - target_z) * Z_SCALE < TOUCH_THRESHOLD_Z:
                 score += 1
                 target_pos, target_body_part = generate_target(frame_width, frame_height)
+                target_x, target_y, target_z = target_pos
         
-        # Draw target
-        draw.ellipse([target_pos[0] - TARGET_RADIUS, target_pos[1] - TARGET_RADIUS, 
-                     target_pos[0] + TARGET_RADIUS, target_pos[1] + TARGET_RADIUS], 
-                    outline=(255, 0, 0), width=3)
-        draw.ellipse([target_pos[0] - 5, target_pos[1] - 5, target_pos[0] + 5, target_pos[1] + 5], 
-                    fill=(255, 0, 0))
+        # Draw target scaled by its own z
+        target_scale = z_to_scale(target_z)  # if you have target z
+        scaled_radius = int(TARGET_RADIUS * target_scale)
+        draw.ellipse([target_x - scaled_radius, target_y - scaled_radius,
+                      target_x + scaled_radius, target_y + scaled_radius],
+                     outline=(255, 0, 0), width=3)
+        draw.ellipse([target_x - 5, target_y - 5, target_x + 5, target_y + 5], fill=(255, 0, 0))
         
-        # Beautiful HUD
+        # HUD
         draw_text_with_background(draw, f"Touch with: {target_body_part}", (20, 20), 
                                  FONT_LARGE, (255, 255, 255), (0, 0, 0, 180), padding=15)
         draw_text_with_background(draw, f"Score: {score}", (20, 80), 
@@ -469,8 +499,8 @@ def play_game(cap, frame_width, frame_height):
             debug_texts = [
                 "DEBUG MODE ON",
                 f"Target: {target_body_part}",
-                f"Target Pos: ({target_pos[0]}, {target_pos[1]})",
-                f"Body Part Pos: ({body_part_x}, {body_part_y})",
+                f"Target Pos: ({target_x}, {target_y}, {target_z:.2f})",
+                f"Body Part Pos: ({body_part_x}, {body_part_y}, {body_part_z:.2f})",
                 f"Distance: {distance:.1f} px",
                 f"Threshold: {TOUCH_THRESHOLD} px"
             ]
@@ -481,13 +511,13 @@ def play_game(cap, frame_width, frame_height):
                                          FONT_SMALL, color, (0, 0, 0, 200), padding=10)
         
         # Controls
-        draw.text((20, frame_height - 40), "Press 'ESC' for menu, 's' silhouette, 'd' debug, or 'q' to quit", 
+        draw.text((20, frame_height - 40), "Press 'ESC' for menu, 's' silhouette, 'd' debug, 'q' quit", 
                  font=FONT_SMALL, fill=(255, 255, 255))
         
         # Convert back to OpenCV
         frame = cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2BGR)
         
-        # Draw skeleton if debug mode (on top of everything)
+        # Draw skeleton if debug mode
         if debug_mode and results.pose_landmarks:
             mp_drawing.draw_landmarks(
                 frame,
@@ -502,7 +532,7 @@ def play_game(cap, frame_width, frame_height):
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             return 'quit'
-        elif key == 27:  # ESC key
+        elif key == 27:  # ESC
             return 'menu'
         elif key == ord('s'):
             show_silhouette = not show_silhouette
@@ -517,6 +547,7 @@ def play_game(cap, frame_width, frame_height):
         cv2.waitKey(wait_time)
     
     return 'quit'
+
 
 def main():
     cap = cv2.VideoCapture(0)
