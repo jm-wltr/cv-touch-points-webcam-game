@@ -32,20 +32,22 @@ LANDMARK_MAP = {
     'Head': mp_pose.PoseLandmark.NOSE
 }
 
-# Load fonts (system fonts or use default)
+# Load fonts (Windows-compatible)
 try:
-    FONT_TITLE = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 60)
-    FONT_LARGE = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 40)
-    FONT_MEDIUM = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 28)
-    FONT_SMALL = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 20)
+    # Try Windows fonts first
+    FONT_TITLE = ImageFont.truetype("arial.ttf", 60)
+    FONT_LARGE = ImageFont.truetype("arial.ttf", 40)
+    FONT_MEDIUM = ImageFont.truetype("arial.ttf", 28)
+    FONT_SMALL = ImageFont.truetype("arial.ttf", 20)
 except:
-    # Fallback for non-Mac systems
     try:
-        FONT_TITLE = ImageFont.truetype("arial.ttf", 60)
-        FONT_LARGE = ImageFont.truetype("arial.ttf", 40)
-        FONT_MEDIUM = ImageFont.truetype("arial.ttf", 28)
-        FONT_SMALL = ImageFont.truetype("arial.ttf", 20)
+        # Try system fonts path
+        FONT_TITLE = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 60)
+        FONT_LARGE = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 40)
+        FONT_MEDIUM = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 28)
+        FONT_SMALL = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 20)
     except:
+        # Fallback to default
         FONT_TITLE = ImageFont.load_default()
         FONT_LARGE = ImageFont.load_default()
         FONT_MEDIUM = ImageFont.load_default()
@@ -166,6 +168,7 @@ def show_menu(cap, frame_width, frame_height):
     FIST_HOLD_FRAMES = 15
     
     mouse_click_button = [None]
+    callback_set = False
     
     def mouse_callback(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -195,8 +198,10 @@ def show_menu(cap, frame_width, frame_height):
         pil_img = Image.fromarray(rgb_frame)
         draw = ImageDraw.Draw(pil_img, 'RGBA')
         
-        # Dark overlay
-        draw.rectangle([0, 0, frame_width, frame_height], fill=(20, 20, 20, 180))
+        # Semi-transparent dark overlay (much lighter for Windows)
+        overlay = Image.new('RGBA', pil_img.size, (20, 20, 20, 100))
+        pil_img = Image.alpha_composite(pil_img.convert('RGBA'), overlay)
+        draw = ImageDraw.Draw(pil_img)
         
         # Title
         title = "BODY PART TOUCH GAME"
@@ -242,8 +247,8 @@ def show_menu(cap, frame_width, frame_height):
         if debug_mode:
             draw.text((frame_width - 250, 30), "DEBUG MODE: ON", font=FONT_MEDIUM, fill=(0, 255, 255))
         
-        # Convert back to OpenCV
-        frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        # Convert back to OpenCV (RGB for compatibility)
+        frame = cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2BGR)
         
         # Draw skeleton if debug
         if debug_mode and pose_results and pose_results.pose_landmarks:
@@ -273,12 +278,10 @@ def show_menu(cap, frame_width, frame_height):
                 cv2.circle(frame, (hand_x, hand_y), 20, cursor_color, -1)
                 cv2.circle(frame, (hand_x, hand_y), 25, (255, 255, 255), 2)
                 
-                # Status text with PIL-like quality
-                pil_overlay = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                draw_overlay = ImageDraw.Draw(pil_overlay)
+                # Status text
                 fist_text = "FIST!" if current_fist_closed else "OPEN"
-                draw_overlay.text((hand_x + 30, hand_y - 10), fist_text, font=FONT_SMALL, fill=(255, 255, 0))
-                frame = cv2.cvtColor(np.array(pil_overlay), cv2.COLOR_RGB2BGR)
+                cv2.putText(frame, fist_text, (hand_x + 30, hand_y - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
                 
                 # Check hover
                 for i, bounds in enumerate(button_bounds):
@@ -304,12 +307,16 @@ def show_menu(cap, frame_width, frame_height):
         else:
             fist_timer = 0
         
-        cv2.setMouseCallback('Body Part Touch Game', mouse_callback, button_bounds)
+        # Show window first
+        cv2.imshow('Body Part Touch Game', frame)
+        
+        # Set mouse callback only once after window is created
+        if not callback_set:
+            cv2.setMouseCallback('Body Part Touch Game', mouse_callback, button_bounds)
+            callback_set = True
         
         if mouse_click_button[0] == 0:
             return 'single'
-        
-        cv2.imshow('Body Part Touch Game', frame)
         
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
@@ -418,7 +425,7 @@ def play_game(cap, frame_width, frame_height):
         draw.text((20, frame_height - 40), "Press 'ESC' for menu, 'd' for debug, or 'q' to quit", 
                  font=FONT_SMALL, fill=(255, 255, 255))
         
-        # Convert back
+        # Convert back to BGR for OpenCV
         frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
         
         cv2.imshow('Body Part Touch Game', frame)
@@ -426,7 +433,7 @@ def play_game(cap, frame_width, frame_height):
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             return 'quit'
-        elif key == 27:
+        elif key == 27:  # ESC key
             return 'menu'
         elif key == ord('d'):
             debug_mode = not debug_mode
@@ -441,8 +448,14 @@ def main():
         print("Error: Cannot access webcam")
         return
     
+    # Set camera resolution (helps with Windows compatibility)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    print(f"Camera initialized: {frame_width}x{frame_height}")
     
     while True:
         mode = show_menu(cap, frame_width, frame_height)
@@ -459,6 +472,7 @@ def main():
     cv2.destroyAllWindows()
     pose.close()
     hands.close()
+    print("Game closed successfully!")
 
 if __name__ == "__main__":
     main()
