@@ -1,0 +1,24 @@
+# Core dependencies (all versions)
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# MediaPipe versions (jaime.py, kristian.py, hybrid.py)
+mediapipe>=0.10.0
+
+# YOLO versions (jay.py, hybrid.py)
+ultralytics>=8.0.0
+
+# Advanced tracking (jay.py - optional)
+scipy>=1.10.0
+insightface>=0.7.0
+onnxruntime>=1.15.0
+
+# Mask R-CNN version (maskrcnn.py - optional, requires GPU)
+torch>=2.0.0
+torchvision>=0.15.0
+# detectron2: Install separately via git (see SETUP_MASKRCNN.md)
+
+# AlphaPose version (alphapose_game.py - optional, best accuracy)
+# alphapose>=0.5.0  # Uncomment if using AlphaPose
+# See SETUP_ALPHAPOSE.md for installation instructions
