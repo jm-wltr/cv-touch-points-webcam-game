@@ -12,7 +12,11 @@ import mediapipe as mp
 model_path = os.path.join(os.path.dirname(__file__), '..', 'multi-pose', 'yolov8n-pose.pt')
 if not os.path.exists(model_path):
     model_path = 'yolov8n-pose.pt'  # Fallback to current directory
-model = YOLO(model_path)
+pose_model = YOLO(model_path)
+
+# Initialize YOLO Segmentation model for person segmentation
+seg_model_path = 'yolov8n-seg.pt'
+seg_model = YOLO(seg_model_path)
 
 class MediaPipeFaceRecognizer:
     """Face recognition using MediaPipe face detection + color/texture features"""
@@ -447,8 +451,8 @@ def main():
         return
     
     # Set higher resolution for webcam
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1600)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1000)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     
     # Get frame dimensions
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -487,8 +491,11 @@ def main():
         # Flip frame horizontally for mirror view
         frame = cv2.flip(frame, 1)
         
+        # Keep original frame for tracking
+        original_frame = frame.copy()
+        
         # Detect poses with YOLO
-        results = model(frame, verbose=False)[0]
+        results = pose_model(original_frame, verbose=False)[0]
         
         detections = []
         if results.boxes is not None and results.keypoints is not None:
@@ -503,7 +510,55 @@ def main():
                 })
         
         # Track people
-        tracks = tracker.update(detections, frame)
+        tracks = tracker.update(detections, original_frame)
+        
+        # Detect segmentation masks
+        seg_results = seg_model(original_frame, verbose=False, classes=[0])[0]  # class 0 is 'person'
+        
+        # Create white background
+        output_frame = np.ones_like(original_frame) * 255
+        
+        # Process segmentation masks
+        if seg_results.masks is not None and len(seg_results.masks) > 0:
+            masks_data = seg_results.masks.data.cpu().numpy()
+            boxes_data = seg_results.boxes.data.cpu().numpy()
+            
+            # Match segmentation masks to tracked players
+            for mask, box in zip(masks_data, boxes_data):
+                seg_bbox = box[:4]
+                
+                # Find best matching tracked player based on bbox overlap
+                best_track_id = None
+                best_iou = 0.0
+                
+                for track in tracks:
+                    track_bbox = track['bbox']
+                    iou = tracker.compute_iou(track_bbox, seg_bbox)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_track_id = track['track_id']
+                
+                # Apply mask with player's color if matched
+                if best_track_id is not None and best_iou > 0.3:
+                    # Resize mask to frame size
+                    mask_resized = cv2.resize(mask, (original_frame.shape[1], original_frame.shape[0]))
+                    mask_bool = mask_resized > 0.5
+                    
+                    # Get player's color
+                    player_color = get_track_color(best_track_id)
+                    
+                    # Create colored overlay
+                    color_overlay = original_frame.copy()
+                    color_overlay[mask_bool] = (
+                        color_overlay[mask_bool] * 0.4 + 
+                        np.array(player_color) * 0.6
+                    ).astype(np.uint8)
+                    
+                    # Apply to output frame
+                    output_frame[mask_bool] = color_overlay[mask_bool]
+        
+        # Use output_frame instead of original_frame for all drawing operations
+        frame = output_frame
         
         # Initialize scores for new players
         for track in tracks:

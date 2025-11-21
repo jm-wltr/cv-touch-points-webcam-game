@@ -21,7 +21,8 @@ hands = mp_hands.Hands(
 # Game settings
 BODY_PARTS = ['Right Hand', 'Left Hand', 'Right Elbow', 'Left Elbow', 'Head']
 TOUCH_THRESHOLD = 50
-score = 0
+player1_score = 0
+player2_score = 0
 debug_mode = False
 
 LANDMARK_MAP = {
@@ -146,12 +147,12 @@ def show_menu(cap, frame_width, frame_height):
             'enabled': True
         },
         {
-            'text': 'Two Players',
+            'text': 'Two Players (Competitive)',
             'position': (center_x, start_y + button_height + button_spacing),
             'size': (button_width, button_height),
-            'color': (100, 100, 100),
+            'color': (150, 50, 50),
             'mode': 'two',
-            'enabled': False
+            'enabled': True
         },
         {
             'text': 'Crazy Multiplayer',
@@ -225,12 +226,11 @@ def show_menu(cap, frame_width, frame_height):
             )
             button_bounds.append(bounds)
         
-        # Coming soon labels
-        for i in range(1, 3):
-            button = buttons[i]
-            x, y = button['position']
-            w, h = button['size']
-            draw.text((x + w + 20, y + h // 2), "Coming Soon!", font=FONT_SMALL, fill=(150, 150, 150))
+        # Coming soon label only for last button
+        button = buttons[2]
+        x, y = button['position']
+        w, h = button['size']
+        draw.text((x + w + 20, y + h // 2), "Coming Soon!", font=FONT_SMALL, fill=(150, 150, 150))
         
         # Instructions
         instructions = [
@@ -285,15 +285,15 @@ def show_menu(cap, frame_width, frame_height):
                 
                 # Check hover
                 for i, bounds in enumerate(button_bounds):
-                    if is_point_in_button((hand_x, hand_y), bounds):
+                    if is_point_in_button((hand_x, hand_y), bounds) and buttons[i]['enabled']:
                         hover_index = i
                         break
         
         # Handle fist selection
-        if current_fist_closed and hover_index == 0:
+        if current_fist_closed and hover_index in [0, 1]:
             fist_timer += 1
             
-            button = buttons[0]
+            button = buttons[hover_index]
             x, y = button['position']
             w, h = button['size']
             
@@ -303,7 +303,7 @@ def show_menu(cap, frame_width, frame_height):
             cv2.rectangle(frame, (x, y + h + 10), (x + w, y + h + 20), (255, 255, 255), 2)
             
             if fist_timer >= FIST_HOLD_FRAMES:
-                return 'single'
+                return buttons[hover_index]['mode']
         else:
             fist_timer = 0
         
@@ -315,14 +315,16 @@ def show_menu(cap, frame_width, frame_height):
             cv2.setMouseCallback('Body Part Touch Game', mouse_callback, button_bounds)
             callback_set = True
         
-        if mouse_click_button[0] == 0:
-            return 'single'
+        if mouse_click_button[0] is not None:
+            if buttons[mouse_click_button[0]]['enabled']:
+                return buttons[mouse_click_button[0]]['mode']
+            mouse_click_button[0] = None
         
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             return None
-        elif key == ord(' ') and hover_index == 0:
-            return 'single'
+        elif key == ord(' ') and hover_index in [0, 1]:
+            return buttons[hover_index]['mode']
         elif key == ord('d'):
             debug_mode = not debug_mode
             print(f"Debug mode: {'ON' if debug_mode else 'OFF'}")
@@ -339,13 +341,13 @@ def generate_target(frame_width, frame_height):
     body_part = random.choice(BODY_PARTS)
     return (x, y), body_part
 
-def play_game(cap, frame_width, frame_height):
-    global score, debug_mode
+def play_single_player(cap, frame_width, frame_height):
+    global debug_mode
     score = 0
     
     target_pos, target_body_part = generate_target(frame_width, frame_height)
     
-    print("Game Started!")
+    print("Single Player Game Started!")
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -441,6 +443,149 @@ def play_game(cap, frame_width, frame_height):
     
     return 'quit'
 
+def play_competitive(cap, frame_width, frame_height):
+    """Competitive two-player mode - race to touch the target!"""
+    global player1_score, player2_score, debug_mode
+    player1_score = 0
+    player2_score = 0
+    
+    target_pos, target_body_part = generate_target(frame_width, frame_height)
+    
+    # Divide screen into two halves
+    mid_x = frame_width // 2
+    
+    print("Competitive Two-Player Game Started!")
+    print("Player 1: Left side of screen")
+    print("Player 2: Right side of screen")
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        frame = cv2.flip(frame, 1)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = pose.process(rgb_frame)
+        
+        # Convert to PIL
+        pil_img = Image.fromarray(rgb_frame)
+        draw = ImageDraw.Draw(pil_img)
+        
+        # Draw dividing line
+        draw.line([(mid_x, 0), (mid_x, frame_height)], fill=(100, 100, 100), width=3)
+        
+        player1_distance = float('inf')
+        player2_distance = float('inf')
+        player1_pos = None
+        player2_pos = None
+        
+        if results.pose_landmarks:
+            if debug_mode:
+                # Draw skeleton
+                frame_temp = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                mp_drawing.draw_landmarks(
+                    frame_temp,
+                    results.pose_landmarks,
+                    mp_pose.POSE_CONNECTIONS,
+                    mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=3),
+                    mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=2)
+                )
+                pil_img = Image.fromarray(cv2.cvtColor(frame_temp, cv2.COLOR_BGR2RGB))
+                draw = ImageDraw.Draw(pil_img)
+            
+            landmark = LANDMARK_MAP[target_body_part]
+            body_part_landmark = results.pose_landmarks.landmark[landmark]
+            
+            body_part_x = int(body_part_landmark.x * frame_width)
+            body_part_y = int(body_part_landmark.y * frame_height)
+            
+            # Determine which player based on position
+            if body_part_x < mid_x:
+                # Player 1 (left side)
+                player1_pos = (body_part_x, body_part_y)
+                player1_distance = calculate_distance(player1_pos, target_pos)
+                
+                # Draw Player 1 tracker
+                draw.ellipse([body_part_x - 15, body_part_y - 15, body_part_x + 15, body_part_y + 15], 
+                            fill=(0, 0, 255))
+                
+                # Check if Player 1 touched
+                if player1_distance < TOUCH_THRESHOLD:
+                    player1_score += 1
+                    print(f"Player 1 scores! Total: {player1_score}")
+                    target_pos, target_body_part = generate_target(frame_width, frame_height)
+            else:
+                # Player 2 (right side)
+                player2_pos = (body_part_x, body_part_y)
+                player2_distance = calculate_distance(player2_pos, target_pos)
+                
+                # Draw Player 2 tracker
+                draw.ellipse([body_part_x - 15, body_part_y - 15, body_part_x + 15, body_part_y + 15], 
+                            fill=(255, 0, 0))
+                
+                # Check if Player 2 touched
+                if player2_distance < TOUCH_THRESHOLD:
+                    player2_score += 1
+                    print(f"Player 2 scores! Total: {player2_score}")
+                    target_pos, target_body_part = generate_target(frame_width, frame_height)
+        
+        # Draw target
+        draw.ellipse([target_pos[0] - 30, target_pos[1] - 30, target_pos[0] + 30, target_pos[1] + 30], 
+                    outline=(0, 255, 0), width=4)
+        draw.ellipse([target_pos[0] - 5, target_pos[1] - 5, target_pos[0] + 5, target_pos[1] + 5], 
+                    fill=(0, 255, 0))
+        
+        # Target instruction
+        draw_text_with_background(draw, f"Touch with: {target_body_part}", 
+                                 (frame_width // 2 - 150, 20), 
+                                 FONT_LARGE, (255, 255, 255), (0, 0, 0, 180), padding=15)
+        
+        # Player scores
+        draw_text_with_background(draw, f"Player 1: {player1_score}", (20, 20), 
+                                 FONT_LARGE, (0, 0, 255), (0, 0, 0, 180), padding=15)
+        draw_text_with_background(draw, f"Player 2: {player2_score}", (frame_width - 250, 20), 
+                                 FONT_LARGE, (255, 0, 0), (0, 0, 0, 180), padding=15)
+        
+        # Player labels
+        draw.text((50, 100), "PLAYER 1", font=FONT_MEDIUM, fill=(100, 100, 255))
+        draw.text((frame_width - 200, 100), "PLAYER 2", font=FONT_MEDIUM, fill=(255, 100, 100))
+        
+        # Debug info
+        if debug_mode:
+            debug_texts = [
+                "DEBUG MODE ON",
+                f"Target: {target_body_part}",
+                f"Target Pos: ({target_pos[0]}, {target_pos[1]})",
+                f"P1 Distance: {player1_distance:.1f} px" if player1_pos else "P1: Not detected",
+                f"P2 Distance: {player2_distance:.1f} px" if player2_pos else "P2: Not detected",
+                f"Threshold: {TOUCH_THRESHOLD} px"
+            ]
+            debug_y = 140
+            for i, text in enumerate(debug_texts):
+                color = (0, 255, 255) if i == 0 else (255, 255, 255)
+                draw_text_with_background(draw, text, (frame_width // 2 - 150, debug_y + i * 25), 
+                                         FONT_SMALL, color, (0, 0, 0, 200), padding=10)
+        
+        # Controls
+        draw.text((20, frame_height - 40), "Press 'ESC' for menu, 'd' for debug, or 'q' to quit", 
+                 font=FONT_SMALL, fill=(255, 255, 255))
+        
+        # Convert back to BGR for OpenCV
+        frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        
+        cv2.imshow('Body Part Touch Game', frame)
+        
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            return 'quit'
+        elif key == 27:  # ESC key
+            return 'menu'
+        elif key == ord('d'):
+            debug_mode = not debug_mode
+            print(f"Debug mode: {'ON' if debug_mode else 'OFF'}")
+    
+    return 'quit'
+
 def main():
     cap = cv2.VideoCapture(0)
     
@@ -464,7 +609,11 @@ def main():
             break
         
         if mode == 'single':
-            result = play_game(cap, frame_width, frame_height)
+            result = play_single_player(cap, frame_width, frame_height)
+            if result == 'quit':
+                break
+        elif mode == 'two':
+            result = play_competitive(cap, frame_width, frame_height)
             if result == 'quit':
                 break
     
